@@ -1,144 +1,36 @@
 # app/ui_streamlit.py
 # --- make project imports & .env loading robust (MUST be first) ---
-import sys, os
+import os
+import sys
 from pathlib import Path
-from typing import List, Tuple, Set
-import hashlib
+from typing import List
 
-ROOT = Path(__file__).resolve().parents[1]              # <repo root>
+ROOT = Path(__file__).resolve().parents[1]  # <repo root>
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dotenv import load_dotenv
-load_dotenv(ROOT / ".env")                              # explicit .env load
+load_dotenv(ROOT / ".env")  # explicit .env load
 # -------------------------------------------------------------------
 
 import streamlit as st
-from typing import List
 from langchain_community.vectorstores import Chroma
 from langchain_community.document_loaders import PyPDFLoader, TextLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.schema import Document
 
 from app.chains import build_retrieval_chain
 from app.embeddings import get_embedder
 from app.llm import get_llm
+from app.utils import (
+    resolve_persist_dir,
+    chroma_doc_count,
+    normalize_source_meta,
+    split_documents,
+    docs_to_texts_metas,
+    make_ids_from_texts,
+)
 
-
-# ----------------------------- helpers ---------------------------------
-def resolve_persist_dir() -> Path:
-    env_dir = os.getenv("CHROMA_PERSIST_DIR") or ".chroma"
-    p = Path(env_dir)
-    if not p.is_absolute():
-        p = (ROOT / p)
-    return p.resolve()
-
-def chroma_open(persist_dir: Path) -> Chroma:
-    return Chroma(persist_directory=str(persist_dir), embedding_function=get_embedder())
-
-def chroma_doc_count(persist_dir: Path) -> int:
-    try:
-        vs = chroma_open(persist_dir)
-        return getattr(vs, "_collection").count()
-    except Exception:
-        try:
-            got = chroma_open(persist_dir).get(limit=1)
-            return len((got or {}).get("ids", []))
-        except Exception:
-            return 0
-
-def sanitize_chunks(chunks: List[Document]) -> Tuple[List[Document], int]:
-    """
-    Keep only chunks whose page_content is a non-empty str.
-    Returns (clean_chunks, skipped_count).
-    """
-    clean = []
-    skipped = 0
-    for d in chunks:
-        pc = getattr(d, "page_content", None)
-        if isinstance(pc, bytes):
-            try:
-                pc = pc.decode("utf-8", errors="ignore")
-                d.page_content = pc
-            except Exception:
-                pc = None
-        if isinstance(pc, str):
-            pc = pc.strip()
-            if pc:
-                d.page_content = pc
-                clean.append(d)
-            else:
-                skipped += 1
-        else:
-            skipped += 1
-    return clean, skipped
-
-def hash_text(s: str) -> str:
-    # Normalize whitespace to reduce trivial diffs
-    normalized = " ".join((s or "").split())
-    return hashlib.sha1(normalized.encode("utf-8", errors="ignore")).hexdigest()
-
-def stamp_hash_metadata(chunks: List[Document]) -> Tuple[List[Document], Set[str]]:
-    """Add a 'hash' field to metadata; return (chunks, set_of_hashes)."""
-    hashes = set()
-    for d in chunks:
-        h = hash_text(d.page_content)
-        d.metadata = dict(d.metadata or {})
-        d.metadata["hash"] = h
-        hashes.add(h)
-    return chunks, hashes
-
-def filter_new_by_hash(persist_dir: Path, chunks: List[Document], hashes: Set[str]) -> List[Document]:
-    """Deduplicate against existing DB by hash (metadata['hash'])."""
-    vs = chroma_open(persist_dir)
-    existing_hashes: Set[str] = set()
-    try:
-        # Query existing by metadata filter (fast): where hash in hashes
-        # Accessing underlying collection for where-in filter
-        col = getattr(vs, "_collection", None)
-        if col is not None and hashes:
-            # Chroma supports where={"hash": {"$in": [...]}}
-            got = col.get(where={"hash": {"$in": list(hashes)}}, include=["metadatas", "ids"])
-            for m in (got.get("metadatas") or []):
-                if isinstance(m, dict) and "hash" in m:
-                    existing_hashes.add(m["hash"])
-    except Exception:
-        pass
-
-    if not existing_hashes:
-        return chunks
-
-    filtered = [d for d in chunks if d.metadata.get("hash") not in existing_hashes]
-    return filtered
-
-def coerce_metadata_to_jsonable(d: Document) -> None:
-    """
-    Ensure metadata is a plain dict with JSON-serializable scalars.
-    """
-    md = dict(d.metadata or {})
-    safe = {}
-    for k, v in md.items():
-        try:
-            # Keep only simple types; stringify the rest
-            if isinstance(v, (str, int, float, bool)) or v is None:
-                safe[k] = v
-            else:
-                safe[k] = str(v)
-        except Exception:
-            safe[k] = str(v)
-    d.metadata = safe
-
-def split_documents(docs: List[Document], chunk_size: int, chunk_overlap: int) -> List[Document]:
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", " ", ""],
-    )
-    out = []
-    for d in docs:
-        for ch in splitter.split_text(d.page_content):
-            out.append(Document(page_content=ch, metadata=dict(d.metadata) if d.metadata else {}))
-    return out
+# ----------------------------- ingest helpers -----------------------------
 
 def ingest_chunks(chunks: List[Document], persist_dir: Path, reset: bool = False) -> tuple[int, int]:
     """
@@ -151,14 +43,17 @@ def ingest_chunks(chunks: List[Document], persist_dir: Path, reset: bool = False
     if reset:
         for item in persist_dir.glob("*"):
             if item.is_file():
-                try: item.unlink()
-                except Exception: pass
+                try:
+                    item.unlink()
+                except Exception:
+                    pass
             else:
                 import shutil
-                try: shutil.rmtree(item, ignore_errors=True)
-                except Exception: pass
+                try:
+                    shutil.rmtree(item, ignore_errors=True)
+                except Exception:
+                    pass
 
-    # Convert once to validated lists
     texts, metadatas, skipped = docs_to_texts_metas(chunks)
 
     added = 0
@@ -182,15 +77,15 @@ def ingest_chunks(chunks: List[Document], persist_dir: Path, reset: bool = False
         )
         if texts:
             ids = make_ids_from_texts(texts)
-            for i, t in enumerate(texts):
-                h = ids[i]
+            # Attach IDs as 'hash' too, for convenience
+            for i, _ in enumerate(texts):
                 metadatas[i] = dict(metadatas[i])
-                metadatas[i]["hash"] = h
+                metadatas[i]["hash"] = ids[i]
             try:
                 vs.add_texts(texts=texts, metadatas=metadatas, ids=ids)
                 added = len(texts)
             except Exception:
-                # If any IDs collide, enforce uniqueness map
+                # Handle ID collisions by enforcing uniqueness
                 uniq = {}
                 for i, id_ in enumerate(ids):
                     if id_ not in uniq:
@@ -218,73 +113,8 @@ def ingest_chunks(chunks: List[Document], persist_dir: Path, reset: bool = False
 
     return added, total
 
-def normalize_source_meta(docs: List[Document]) -> None:
-    # Make metadata['source'] nice (relative to repo root for display)
-    for d in docs:
-        src = d.metadata.get("source")
-        if not src:
-            continue
-        try:
-            p = Path(src)
-            if p.is_absolute():
-                d.metadata["source"] = str(p.relative_to(ROOT)).replace("\\", "/")
-            else:
-                d.metadata["source"] = str(p).replace("\\", "/")
-        except Exception:
-            pass
 
-def docs_to_texts_metas(chunks: List[Document]) -> tuple[list[str], list[dict], int]:
-    """
-    Convert Document[] -> (texts, metadatas) with strict sanitation.
-    Returns: (texts, metadatas, skipped_count)
-    - Only keeps items where page_content is a non-empty str.
-    - Ensures metadata is JSON-safe dict.
-    """
-    texts: list[str] = []
-    metas: list[dict] = []
-    skipped = 0
-    for d in chunks:
-        # coerce metadata to JSON-safe
-        md = dict(d.metadata or {})
-        safe = {}
-        for k, v in md.items():
-            try:
-                if isinstance(v, (str, int, float, bool)) or v is None:
-                    safe[k] = v
-                else:
-                    safe[k] = str(v)
-            except Exception:
-                safe[k] = str(v)
-
-        # coerce content to clean str
-        pc = getattr(d, "page_content", None)
-        if isinstance(pc, bytes):
-            try:
-                pc = pc.decode("utf-8", errors="ignore")
-            except Exception:
-                pc = None
-        if isinstance(pc, str):
-            s = pc.strip()
-            if s:
-                texts.append(s)
-                metas.append(safe)
-            else:
-                skipped += 1
-        else:
-            skipped += 1
-    return texts, metas, skipped
-
-
-def make_ids_from_texts(texts: list[str]) -> list[str]:
-    """Deterministic IDs from normalized text (for dedupe at storage layer)."""
-    out = []
-    for t in texts:
-        norm = " ".join(t.split())
-        out.append(hashlib.sha1(norm.encode("utf-8", errors="ignore")).hexdigest())
-    return out
-
-# ----------------------------------------------------------------------
-
+# ----------------------------- UI ---------------------------------
 
 st.set_page_config(page_title="Finance LLM Agent (RAG)", layout="wide")
 st.title("💼 Finance LLM Agent (RAG)")
@@ -320,7 +150,7 @@ st.markdown("### 📥 Ingest & Rebuild")
 tab_upload, tab_rebuild = st.tabs(["Upload & Ingest (append)", "Rebuild index (reset folder)"])
 
 with tab_upload:
-    st.caption("Upload PDF/TXT/MD files — they will be **appended** to the existing vector DB.")
+    st.caption("Upload PDF/TXT/MD files — they will be appended to the existing vector DB.")
     uploaded = st.file_uploader("Upload files", type=["pdf", "txt", "md"], accept_multiple_files=True)
     col1, col2 = st.columns(2)
     with col1:
@@ -359,7 +189,7 @@ with tab_upload:
             st.info("Retrieval chain refreshed.")
 
 with tab_rebuild:
-    st.caption("**Reset** the DB and parse all files from a folder (relative to repo root).")
+    st.caption("Reset the DB and parse all files from a folder (relative to repo root).")
     default_folder = "data/seed_docs"
     source_dir_str = st.text_input("Folder to (re)ingest", value=default_folder)
     col1, col2 = st.columns(2)
@@ -376,10 +206,7 @@ with tab_rebuild:
             st.error(f"Folder not found: {source_dir}")
         else:
             # Discover files
-            paths = []
-            for p in source_dir.rglob("*"):
-                if p.suffix.lower() in {".pdf", ".txt", ".md"}:
-                    paths.append(p)
+            paths = [p for p in source_dir.rglob("*") if p.suffix.lower() in {".pdf", ".txt", ".md"}]
             if not paths:
                 st.warning(f"No supported files in {source_dir}")
             else:
@@ -395,7 +222,7 @@ with tab_rebuild:
                     except Exception as e:
                         st.error(f"Failed to load {pth.name}: {e}")
                     if i % 5 == 0:
-                        progress.progress(min(1.0, i/len(paths)), text=f"Loading {i}/{len(paths)} files…")
+                        progress.progress(min(1.0, i / len(paths)), text=f"Loading {i}/{len(paths)} files…")
                 progress.progress(1.0, text="Loaded files.")
 
                 normalize_source_meta(docs)
@@ -436,7 +263,7 @@ if question:
     else:
         for i, d in enumerate(docs, start=1):
             meta = getattr(d, "metadata", {}) or {}
-            src  = meta.get("source") or meta.get("file_path") or meta.get("path") or "unknown"
+            src = meta.get("source") or meta.get("file_path") or meta.get("path") or "unknown"
             page = meta.get("page") or meta.get("Page") or meta.get("page_number")
             st.markdown(f"**{i}. {src}** — page {page if page is not None else 'N/A'}")
             with st.expander("View excerpt"):

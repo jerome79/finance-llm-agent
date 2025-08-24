@@ -7,11 +7,13 @@ from app.prompts import SYSTEM_PROMPT
 from app.llm import get_llm
 from pathlib import Path
 from dotenv import load_dotenv
-
+from typing import Optional
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.chains import create_retrieval_chain
+from app.utils import load_env, resolve_persist_dir, get_vectorstore
 
-def build_retrieval_chain(k: int = 4, persist_dir: str | None = None):
+
+def build_retrieval_chain(k: int = 4, persist_dir: Optional[str] = None):
     """
     Modern retrieval chain using LangChain 0.2+.
 
@@ -21,46 +23,35 @@ def build_retrieval_chain(k: int = 4, persist_dir: str | None = None):
         print(res["answer"])
         print(res["context"])  # List[Document]
 
-    Returns:
-        Runnable chain with structured outputs:
-          {
-            "input": str,
-            "answer": str,
-            "context": List[Document]
-          }
+    Returns a Runnable chain with outputs:
+      {
+        "input": str,
+        "answer": str,
+        "context": List[Document]
+      }
     """
-    # --- Resolve persist dir (absolute path, consistent across envs) ---
-    # Resolve repo root and load .env explicitly
-    ROOT = Path(__file__).resolve().parents[1]
-    load_dotenv(ROOT / ".env")
+    # Ensure env is loaded and vectorstore resolved in a single place
+    load_env()
+    pdir = resolve_persist_dir() if persist_dir is None else persist_dir
 
-    # Resolve persist_dir to an absolute path (same rule as chains/ingest)
-    env_dir = os.getenv("CHROMA_PERSIST_DIR") or ".chroma"
-    persist_dir = (ROOT / env_dir) if not Path(env_dir).is_absolute() else Path(env_dir)
-    persist_dir = str(persist_dir.resolve())
-    # --- Vector store & retriever ---
-    vs = Chroma(
-        persist_directory=persist_dir,
-        embedding_function=get_embedder()
-    )
+    vs = get_vectorstore(pdir)
     retriever = vs.as_retriever(search_kwargs={"k": k})
 
-    # --- LLM ---
     llm = get_llm()
 
-    # --- Prompt (docs → {context}, question → {input}) ---
+    # Prompt (docs -> {context}, question -> {input})
     template = SYSTEM_PROMPT + "\n\nContext:\n{context}\n\nQuestion: {input}\nAnswer:"
     prompt = PromptTemplate.from_template(template)
 
-    # --- Combine retrieved docs into a single LLM call ---
+    # Combine retrieved docs into a single LLM call
     combine_docs_chain = create_stuff_documents_chain(
         llm=llm,
-        prompt=prompt
+        prompt=prompt,
     )
 
-    # --- Retrieval pipeline ---
+    # Retrieval pipeline
     chain = create_retrieval_chain(
         retriever=retriever,
-        combine_docs_chain=combine_docs_chain
+        combine_docs_chain=combine_docs_chain,
     )
     return chain
