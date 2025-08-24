@@ -6,17 +6,18 @@ langchain-community==0.2.16
 huggingface-hub==0.23.5
 
 # Vectorstore + UI + utils
-chromadb
+chromadb==0.5.4
 tiktoken
-pypdf
+pypdf==4.2.0
 unstructured
-sentence-transformers
-streamlit
-python-dotenv
+sentence-transformers==3.0.1
+streamlit==1.37.1
+python-dotenv==1.0.1
 pandas
 yfinance
-transformers
+transformers==4.43.3
 torch
+pytest==8.3.2
 
 # Providers (optional)
 langchain-openai        # for OpenAI / DeepSeek (OpenAI-compatible)

@@ -1,0 +1,11 @@
+# Minimal golden questions for sanity checks
+# - 'query': user question
+# - 'hint': optional substring expected in at least one source
+# - 'min_k': how many docs to fetch for eval (k)
+- query: "What are the main risk factors mentioned?"
+  hint: "risk"
+  min_k: 4
+
+- query: "Who are the key competitors discussed?"
+  hint: "competitor"
+  min_k: 4
