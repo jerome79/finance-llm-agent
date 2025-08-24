@@ -1,17 +1,12 @@
-import os
-from langchain.chains import RetrievalQA
-from langchain.prompts import PromptTemplate
-from langchain_community.vectorstores import Chroma
-from app.embeddings import get_embedder
-from app.prompts import SYSTEM_PROMPT
-from app.llm import get_llm
-from pathlib import Path
-from dotenv import load_dotenv
 from typing import Optional
+
+from langchain.prompts import PromptTemplate
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.chains import create_retrieval_chain
-from app.utils import load_env, resolve_persist_dir, get_vectorstore
 
+from app.prompts import SYSTEM_PROMPT
+from app.llm import get_llm
+from app.utils import load_env, resolve_persist_dir, get_vectorstore
 
 def build_retrieval_chain(k: int = 4, persist_dir: Optional[str] = None):
     """
