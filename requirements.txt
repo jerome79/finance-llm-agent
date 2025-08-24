@@ -1,0 +1,24 @@
+# LangChain pair (match minors)
+langchain==0.2.16
+langchain-community==0.2.16
+
+# HF client
+huggingface-hub==0.23.5
+
+# Vectorstore + UI + utils
+chromadb
+tiktoken
+pypdf
+unstructured
+sentence-transformers
+streamlit
+python-dotenv
+pandas
+yfinance
+transformers
+torch
+
+# Providers (optional)
+langchain-openai        # for OpenAI / DeepSeek (OpenAI-compatible)
+langchain-mistralai     # for Mistral API
+httpx
