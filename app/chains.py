@@ -64,26 +64,3 @@ def build_retrieval_chain(k: int = 4, persist_dir: str | None = None):
         combine_docs_chain=combine_docs_chain
     )
     return chain
-
-
-
-
-def build_retrieval_chain_old_version():
-    persist_dir = os.getenv("CHROMA_PERSIST_DIR", ".chroma")
-
-    # Vector store with HF embeddings
-    vs = Chroma(persist_directory=persist_dir, embedding_function=get_embedder())
-    retriever = vs.as_retriever(search_kwargs={"k": 4})
-
-    llm = get_llm()
-
-    template = SYSTEM_PROMPT + "\n\nContext:\n{context}\n\nQuestion: {question}\nAnswer:"
-    prompt = PromptTemplate.from_template(template)
-
-    qa = RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=retriever,
-        chain_type_kwargs={"prompt": prompt,"document_variable_name": "context"}, return_source_documents=True,
-    )
-    return qa
